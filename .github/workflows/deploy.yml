@@ -6,8 +6,11 @@ on:
       - main
     paths:
       - 'app/**'
+      - 'scripts/**'
+      - 'nginx/**'
       - 'Dockerfile'
       - '.github/workflows/deploy.yml'
+      - 'docker-compose.yml'
   workflow_dispatch:
     inputs:
       environment:
