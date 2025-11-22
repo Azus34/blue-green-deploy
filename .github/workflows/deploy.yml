@@ -97,8 +97,9 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TARGET=${{ github.event.inputs.environment }}
           else
-            # Alternar entre blue y green automáticamente
-            if [ "$(date +%d)" -lt 15 ]; then
+            # Alternar entre blue y green basado en el contador de commits
+            COMMIT_COUNT=$(git rev-list --all --count)
+            if [ $((COMMIT_COUNT % 2)) -eq 0 ]; then
               TARGET="blue"
             else
               TARGET="green"
