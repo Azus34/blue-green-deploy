@@ -131,6 +131,9 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
           
+          # Copy scripts to VPS
+          scp -i ~/.ssh/id_ed25519 -r scripts/ $VPS_USER@$VPS_HOST:~/blue-green-deploy/
+          
           ssh -i ~/.ssh/id_ed25519 $VPS_USER@$VPS_HOST << EOFSCRIPT
             set -e
             cd ~/blue-green-deploy || cd /home/deployer/blue-green-deploy || exit 1
