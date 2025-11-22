@@ -18,7 +18,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Ruta de estado detallado
+// Ruta de estado detallad
 app.get('/status', (req, res) => {
   res.status(200).json({
     status: 'UP',
