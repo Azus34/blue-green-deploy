@@ -1,0 +1,29 @@
+{
+  "name": "blue-green-app",
+  "version": "1.0.0",
+  "description": "Simple Node.js app for Blue-Green Deployment demonstration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "ENVIRONMENT=DEVELOPMENT VERSION=dev-1.0.0 node server.js",
+    "blue": "ENVIRONMENT=BLUE VERSION=1.0.0 node server.js",
+    "green": "ENVIRONMENT=GREEN VERSION=2.0.0 node server.js"
+  },
+  "keywords": [
+    "blue-green",
+    "deployment",
+    "docker",
+    "ci-cd"
+  ],
+  "author": "DevOps Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

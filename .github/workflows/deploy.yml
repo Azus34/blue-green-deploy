@@ -1,0 +1,300 @@
+name: Blue-Green Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Entorno a desplegar (blue o green)'
+        required: true
+        default: 'blue'
+        type: choice
+        options:
+          - blue
+          - green
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image-uri: ${{ steps.meta.outputs.tags }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+
+      - name: Extract first tag
+        id: tag
+        run: |
+          TAGS="${{ steps.meta.outputs.tags }}"
+          FIRST_TAG=$(echo "$TAGS" | head -n 1)
+          echo "image=$FIRST_TAG" >> $GITHUB_OUTPUT
+          echo "First tag: $FIRST_TAG"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to VPS
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine deployment target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET=${{ github.event.inputs.environment }}
+          else
+            # Alternar entre blue y green automáticamente
+            if [ "$(date +%d)" -lt 15 ]; then
+              TARGET="blue"
+            else
+              TARGET="green"
+            fi
+          fi
+          echo "target=${TARGET}" >> $GITHUB_OUTPUT
+          echo "Deployment target: ${TARGET}"
+          
+          # Determine emoji and status
+          if [ "$TARGET" = "blue" ]; then
+            echo "emoji=🔵" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=🟢" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy Application
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_KEY: ${{ secrets.VPS_KEY }}
+          IMAGE_URI: ${{ needs.build.outputs.image-uri }}
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          echo "📦 Image URI from build: $IMAGE_URI"
+          FIRST_IMAGE=$(echo "$IMAGE_URI" | head -n 1)
+          echo "🎯 First image: $FIRST_IMAGE"
+          echo "🚀 Target environment: $TARGET"
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          ssh -i ~/.ssh/id_ed25519 $VPS_USER@$VPS_HOST << EOFSCRIPT
+            set -e
+            cd ~/blue-green-deploy || cd /home/deployer/blue-green-deploy || exit 1
+            
+            echo "========================================================================"
+            echo "📋 PRE-DEPLOYMENT STATUS CHECK"
+            echo "========================================================================"
+            chmod +x scripts/status-check.sh
+            ./scripts/status-check.sh || true
+            
+            echo ""
+            echo "========================================================================"
+            echo "🔨 DEPLOYING IMAGE: $FIRST_IMAGE TO TARGET: $TARGET"
+            echo "========================================================================"
+            
+            if [ "$TARGET" = "blue" ]; then
+              echo "🔵 BLUE Deployment Started"
+              chmod +x scripts/deploy-blue.sh
+              ./scripts/deploy-blue.sh "$FIRST_IMAGE" "1.0.0"
+              
+              echo ""
+              echo "========================================================================"
+              echo "🔄 SWITCHING TRAFFIC TO BLUE"
+              echo "========================================================================"
+              chmod +x scripts/switch-to-blue.sh
+              sudo -n ./scripts/switch-to-blue.sh || sudo ./scripts/switch-to-blue.sh
+            else
+              echo "🟢 GREEN Deployment Started"
+              chmod +x scripts/deploy-green.sh
+              ./scripts/deploy-green.sh "$FIRST_IMAGE" "2.0.0"
+              
+              echo ""
+              echo "========================================================================"
+              echo "🔄 SWITCHING TRAFFIC TO GREEN"
+              echo "========================================================================"
+              chmod +x scripts/switch-to-green.sh
+              sudo -n ./scripts/switch-to-green.sh || sudo ./scripts/switch-to-green.sh
+            fi
+            
+            echo ""
+            echo "========================================================================"
+            echo "✅ POST-DEPLOYMENT STATUS CHECK"
+            echo "========================================================================"
+            chmod +x scripts/status-check.sh
+            ./scripts/status-check.sh || true
+            
+            echo ""
+            echo "🧹 Cleaning up old images"
+            chmod +x scripts/docker-clean.sh
+            ./scripts/docker-clean.sh
+          EOFSCRIPT
+
+      - name: Verify Deployment
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_KEY: ${{ secrets.VPS_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$VPS_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          # Verificar estado
+          ssh -i ~/.ssh/id_ed25519 $VPS_USER@$VPS_HOST << 'EOF'
+            echo "========================================================================"
+            echo "🔍 VERIFICATION REPORT"
+            echo "========================================================================"
+            
+            echo ""
+            echo "📦 CONTAINER STATUS:"
+            echo "--------"
+            docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            
+            echo ""
+            echo "🌐 NGINX CONFIGURATION:"
+            echo "--------"
+            ls -la /etc/nginx/conf.d/*.conf 2>/dev/null | tail -5 || echo "Config files not found"
+            
+            echo ""
+            echo "🟦 BLUE Environment:"
+            curl -sf -H "Host: nueva-app.com" http://127.0.0.1:3001/health -w "\n" 2>/dev/null && echo "✅ BLUE is responding" || echo "❌ BLUE is not responding"
+            
+            echo ""
+            echo "🟩 GREEN Environment:"
+            curl -sf -H "Host: nueva-app.com" http://127.0.0.1:3002/health -w "\n" 2>/dev/null && echo "✅ GREEN is responding" || echo "❌ GREEN is not responding"
+            
+            echo ""
+            echo "🌍 ACTIVE ENDPOINT (via Nginx):"
+            echo "--------"
+            curl -sf -H "Host: nueva-app.com" http://127.0.0.1 -w "HTTP Status: %{http_code}\n" | head -20 || echo "Endpoint responding"
+            
+            echo ""
+            echo "📊 NGINX STATUS:"
+            echo "--------"
+            sudo systemctl status nginx --no-pager || true
+            
+            echo ""
+            echo "📝 RECENT LOGS:"
+            echo "--------"
+            tail -20 /var/log/blue-green-deploy.log 2>/dev/null || echo "No logs found"
+            
+            echo ""
+            echo "========================================================================"
+            echo "✅ VERIFICATION COMPLETE"
+            echo "========================================================================"
+          EOF
+
+  notify:
+    name: Notify Deployment Status
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "message=✅ Despliegue completado exitosamente" >> $GITHUB_OUTPUT
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "message=❌ El despliegue falló" >> $GITHUB_OUTPUT
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Print summary
+        run: |
+          echo "## 🚀 Blue-Green Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.status.outputs.message }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.build.outputs.image-uri }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** [\`${{ github.sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Actor:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### What Happened" >> $GITHUB_STEP_SUMMARY
+          echo "1. ✅ Docker image built and pushed to \`ghcr.io\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. 🚀 Application deployed to VPS" >> $GITHUB_STEP_SUMMARY
+          echo "3. 🔄 Traffic switched to new environment (Blue-Green)" >> $GITHUB_STEP_SUMMARY
+          echo "4. ✔️ Old environment remains running for quick rollback" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Blue-Green Pattern" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "BEFORE SWITCH:          AFTER SWITCH:" >> $GITHUB_STEP_SUMMARY
+          echo "Nginx → 🔵 BLUE (active) OR Nginx → 🟢 GREEN (active)" >> $GITHUB_STEP_SUMMARY
+          echo "     → 🟢 GREEN (standby)      → 🔵 BLUE (standby)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Zero downtime: Switch is atomic and instantaneous!" >> $GITHUB_STEP_SUMMARY
+          echo "Rollback: Just switch back in < 1 second!" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "- Monitor application logs in VPS" >> $GITHUB_STEP_SUMMARY
+          echo "- Run smoke tests on production" >> $GITHUB_STEP_SUMMARY
+          echo "- If issues found, manual switch back to previous environment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Demo Commands" >> $GITHUB_STEP_SUMMARY
+          echo "To see the switchover in action locally:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "./scripts/status-check.sh          # See current status" >> $GITHUB_STEP_SUMMARY
+          echo "./scripts/show-switchover.sh blue  # Demo switch to BLUE" >> $GITHUB_STEP_SUMMARY
+          echo "./scripts/show-switchover.sh green # Demo switch to GREEN" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

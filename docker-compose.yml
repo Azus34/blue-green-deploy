@@ -1,0 +1,49 @@
+# Docker Compose para desarrollo local
+version: '3.8'
+
+services:
+  app-blue:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: app-blue
+    environment:
+      ENVIRONMENT: BLUE
+      VERSION: 1.0.0
+      PORT: 3000
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - bg-network
+
+  app-green:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: app-green
+    environment:
+      ENVIRONMENT: GREEN
+      VERSION: 2.0.0
+      PORT: 3000
+    ports:
+      - "127.0.0.1:3002:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - bg-network
+
+networks:
+  bg-network:
+    driver: bridge
